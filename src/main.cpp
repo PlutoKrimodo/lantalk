@@ -1,10 +1,13 @@
 #include<sys/socket.h>
+#include<sys/epoll.h>
 #include<netinet/in.h>
 #include<cstring>
 #include<cstdio>
 #include<cerrno>
 #include<unistd.h>
 #include<arpa/inet.h>
+
+constexpr int MAX_EVENTS=64;
 
 int main(){
     int listen_fd=socket(AF_INET,SOCK_STREAM,0);
@@ -34,32 +37,58 @@ int main(){
         return 1;
     }
 
-    printf("listening on 0.0.0.0:8888 (press Ctrl+C to exit)\n");
-    while (true){
-        sockaddr_in client_addr;
-        socklen_t cli_len=sizeof(client_addr);
-        int conn_fd=accept(listen_fd,(sockaddr*)&client_addr,&cli_len);
-        if (conn_fd < 0) {
-            fprintf(stderr, "accept() failed: %s\n", strerror(errno));
-            continue;
-        }
-        printf("connection accepted: %s:%d\n",inet_ntoa(client_addr.sin_addr),ntohs(client_addr.sin_port));
-        while(true){
-            char buf[1024];
-            ssize_t n=read(conn_fd,buf,sizeof(buf));
-
-            if(n==0){
-                printf("client: %s%d closed connection\n",inet_ntoa(client_addr.sin_addr),ntohs(client_addr.sin_port));
-                break;
-            }else if(n<0){
-                fprintf(stderr,"read() failed: %s\n",strerror(errno));
-                break;
-            }
-            write(conn_fd,buf,n);
-        }
-        close(conn_fd);
+    int epfd=epoll_create1(0);
+    if(epfd<0){
+        fprintf(stderr,"epoll_create1() failed:%s\n",strerror(errno));
+        return 1;
     }
-    
+
+    epoll_event ev,events[MAX_EVENTS];
+    ev.events=EPOLLIN;
+    ev.data.fd=listen_fd;
+    epoll_ctl(epfd,EPOLL_CTL_ADD,listen_fd,&ev);
+
+    printf("epoll server listening on 0.0.0.0:8888 (press Ctrl+C to exit)\n");
+    while(true){
+        //无限等待
+        int n=epoll_wait(epfd,events,MAX_EVENTS,-1);
+        if(n<0){
+            //被信号打断，不是报错，跳出循环
+            if(errno==EINTR){
+                continue;
+            }
+            fprintf(stderr,"epoll_wait: %s\n",strerror(errno));
+            return 1;
+        }
+        for(int i=0;i<n;i++){
+            int fd=events[i].data.fd;
+            //来新客人了
+            if(fd==listen_fd){
+                sockaddr_in cli_addr;
+                socklen_t cli_len=sizeof(cli_addr);
+                int conn_fd=accept(listen_fd,(sockaddr*)&cli_addr,&cli_len);
+                if(conn_fd<0){
+                    fprintf(stderr,"accept: %s\n",strerror(errno));
+                    continue;
+                }
+                printf("client connected: %s:%d fd=%d\n",
+                    inet_ntoa(cli_addr.sin_addr),ntohs(cli_addr.sin_port),conn_fd);
+                
+                epoll_event cev;
+                cev.events=EPOLLIN;
+                cev.data.fd=conn_fd;
+                epoll_ctl(epfd,EPOLL_CTL_ADD,conn_fd,&cev);
+            }else{
+                //某个客人的专线就绪，有数据可读
+                char buf[1024];
+                ssize_t r=read(fd,buf,sizeof(buf));
+                if(r>0){
+                    write(fd,buf,r);
+                }
+            }
+        }
+    }
+    close(epfd);
     close(listen_fd);
     return 0;
 }
