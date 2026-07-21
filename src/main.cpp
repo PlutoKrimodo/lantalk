@@ -84,6 +84,17 @@ int main(){
                 ssize_t r=read(fd,buf,sizeof(buf));
                 if(r>0){
                     write(fd,buf,r);
+                }else if(r==0){
+                    //客户端关闭连接
+                    printf("client fd=%d disconnected\n",fd);
+                    epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
+                    close(fd);
+                }else{
+                    //r<0
+                    fprintf(stderr,"read: %s\n",strerror(errno));
+                    //r==0
+                    epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
+                    close(fd);
                 }
             }
         }
