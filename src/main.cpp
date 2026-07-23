@@ -6,6 +6,13 @@
 #include<cerrno>
 #include<unistd.h>
 #include<arpa/inet.h>
+#include<fcntl.h>
+
+//fd转换为非阻塞模式
+void set_nonblock(int fd){
+    int flags=fcntl(fd,F_GETFL,0);
+    fcntl(fd,F_SETFL,flags|O_NONBLOCK);
+}
 
 constexpr int MAX_EVENTS=64;
 
@@ -44,7 +51,8 @@ int main(){
     }
 
     epoll_event ev,events[MAX_EVENTS];
-    ev.events=EPOLLIN;
+    //边缘触发模式
+    ev.events=EPOLLIN|EPOLLET; 
     ev.data.fd=listen_fd;
     epoll_ctl(epfd,EPOLL_CTL_ADD,listen_fd,&ev);
 
@@ -73,28 +81,44 @@ int main(){
                 }
                 printf("client connected: %s:%d fd=%d\n",
                     inet_ntoa(cli_addr.sin_addr),ntohs(cli_addr.sin_port),conn_fd);
-                
+
+                //conn_fd设置为非阻塞模式
+                set_nonblock(conn_fd);  
+
                 epoll_event cev;
-                cev.events=EPOLLIN;
+                //边缘触发模式
+                cev.events=EPOLLIN|EPOLLET;
                 cev.data.fd=conn_fd;
                 epoll_ctl(epfd,EPOLL_CTL_ADD,conn_fd,&cev);
             }else{
                 //某个客人的专线就绪，有数据可读
                 char buf[1024];
-                ssize_t r=read(fd,buf,sizeof(buf));
-                if(r>0){
-                    write(fd,buf,r);
-                }else if(r==0){
-                    //客户端关闭连接
-                    printf("client fd=%d disconnected\n",fd);
-                    epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
-                    close(fd);
-                }else{
-                    //r<0
-                    fprintf(stderr,"read: %s\n",strerror(errno));
-                    //r==0
-                    epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
-                    close(fd);
+                
+                //使用循环读取，直到读完所有数据
+                //ET模式下，内核只会在“无数据->有数据”时通知一次，但是通知里到了多少字节不知道，所以需要换为循环
+                //一直读到EAGIAN为止，防止残余数据不再触发通知，最后永远留在内核缓冲区里
+                while(true){
+                    ssize_t r=read(fd,buf,sizeof(buf)); 
+                    if(r>0){
+                        write(fd,buf,r);
+                    }else if(r==0){
+                        //客户端关闭连接
+                        printf("client fd=%d disconnected\n",fd);
+                        epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
+                        close(fd);
+                        break;
+                    }else{
+                        if(errno==EAGAIN||errno==EWOULDBLOCK){
+                            //数据读完了，正常退出
+                            break;
+                        }
+                        
+                        // 只有遇到 EAGAIN 之外的错误（如 ECONNRESET），才真正关闭连接
+                        fprintf(stderr, "read fd=%d error: %s\n", fd, strerror(errno));
+                        epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
+                        close(fd);
+                        break;
+                    }
                 }
             }
         }
