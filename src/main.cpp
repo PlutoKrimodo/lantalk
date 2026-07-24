@@ -43,6 +43,7 @@ int main(){
         close(listen_fd);
         return 1;
     }
+    set_nonblock(listen_fd);  //监听套接字设置为非阻塞模式
 
     int epfd=epoll_create1(0);
     if(epfd<0){
@@ -51,7 +52,7 @@ int main(){
     }
 
     epoll_event ev,events[MAX_EVENTS];
-    //边缘触发模式
+    //边缘触发模式 ET
     ev.events=EPOLLIN|EPOLLET; 
     ev.data.fd=listen_fd;
     epoll_ctl(epfd,EPOLL_CTL_ADD,listen_fd,&ev);
@@ -72,24 +73,35 @@ int main(){
             int fd=events[i].data.fd;
             //来新客人了
             if(fd==listen_fd){
-                sockaddr_in cli_addr;
-                socklen_t cli_len=sizeof(cli_addr);
-                int conn_fd=accept(listen_fd,(sockaddr*)&cli_addr,&cli_len);
-                if(conn_fd<0){
-                    fprintf(stderr,"accept: %s\n",strerror(errno));
-                    continue;
+                while(true){
+                    sockaddr_in cli_addr;
+                    socklen_t cli_len=sizeof(cli_addr);
+                    int conn_fd=accept(listen_fd,(sockaddr*)&cli_addr,&cli_len);
+                    if(conn_fd<0){
+                        if(errno==EAGAIN||errno==EWOULDBLOCK){
+                            //没有新连接了，正常退出
+                            break;
+                        }
+                        if(errno == ECONNABORTED){
+                            continue; // 客户端在连接过程中断开，继续等待下一个连接
+                        }
+                        //其他错误
+                        fprintf(stderr,"accept: %s\n",strerror(errno));
+                        break;
+                    }
+                
+                    printf("client connected: %s:%d fd=%d\n",
+                        inet_ntoa(cli_addr.sin_addr),ntohs(cli_addr.sin_port),conn_fd);
+
+                    //conn_fd设置为非阻塞模式
+                    set_nonblock(conn_fd);  
+
+                    epoll_event cev;
+                    //边缘触发模式
+                    cev.events=EPOLLIN|EPOLLET;
+                    cev.data.fd=conn_fd;
+                    epoll_ctl(epfd,EPOLL_CTL_ADD,conn_fd,&cev);
                 }
-                printf("client connected: %s:%d fd=%d\n",
-                    inet_ntoa(cli_addr.sin_addr),ntohs(cli_addr.sin_port),conn_fd);
-
-                //conn_fd设置为非阻塞模式
-                set_nonblock(conn_fd);  
-
-                epoll_event cev;
-                //边缘触发模式
-                cev.events=EPOLLIN|EPOLLET;
-                cev.data.fd=conn_fd;
-                epoll_ctl(epfd,EPOLL_CTL_ADD,conn_fd,&cev);
             }else{
                 //某个客人的专线就绪，有数据可读
                 char buf[1024];
@@ -100,6 +112,10 @@ int main(){
                 while(true){
                     ssize_t r=read(fd,buf,sizeof(buf)); 
                     if(r>0){
+                        // 打印收到的数据到服务端终端（方便观察 HTTP 请求报文）
+                        fwrite(buf, 1, r, stdout);   // 直接写入标准输出，比 printf 更安全
+                        fflush(stdout);              // 立刻刷新，保证实时显示
+                        
                         write(fd,buf,r);
                     }else if(r==0){
                         //客户端关闭连接
