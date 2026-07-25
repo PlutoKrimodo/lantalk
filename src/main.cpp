@@ -7,6 +7,7 @@
 #include<unistd.h>
 #include<arpa/inet.h>
 #include<fcntl.h>
+constexpr int MAX_EVENTS=64;
 
 //fd转换为非阻塞模式
 void set_nonblock(int fd){
@@ -14,7 +15,73 @@ void set_nonblock(int fd){
     fcntl(fd,F_SETFL,flags|O_NONBLOCK);
 }
 
-constexpr int MAX_EVENTS=64;
+void handle_accept(int epfd,int listen_fd){
+    while(true){
+        sockaddr_in cli_addr;
+        socklen_t cli_len=sizeof(cli_addr);
+        int conn_fd=accept(listen_fd,(sockaddr*)&cli_addr,&cli_len);
+        if(conn_fd<0){
+            if(errno==EAGAIN||errno==EWOULDBLOCK){
+                //没有新连接了，正常退出
+                break;
+            }
+            if(errno == ECONNABORTED){
+                continue; // 客户端在连接过程中断开，继续等待下一个连接
+            }
+            //其他错误
+            fprintf(stderr,"accept: %s\n",strerror(errno));
+            break;
+            }
+                
+            printf("client connected: %s:%d fd=%d\n",
+            inet_ntoa(cli_addr.sin_addr),ntohs(cli_addr.sin_port),conn_fd);
+
+            //conn_fd设置为非阻塞模式
+            set_nonblock(conn_fd);  
+
+            epoll_event cev;
+            //边缘触发模式
+            cev.events=EPOLLIN|EPOLLET;
+            cev.data.fd=conn_fd;
+            epoll_ctl(epfd,EPOLL_CTL_ADD,conn_fd,&cev);
+    }
+}
+
+void handle_read(int epfd,int fd){
+    //某个客人的专线就绪，有数据可读
+    char buf[1024];
+                
+    //使用循环读取，直到读完所有数据
+    //ET模式下，内核只会在“无数据->有数据”时通知一次，但是通知里到了多少字节不知道，所以需要换为循环
+    //一直读到EAGIAN为止，防止残余数据不再触发通知，最后永远留在内核缓冲区里
+    while(true){
+        ssize_t r=read(fd,buf,sizeof(buf)); 
+        if(r>0){
+            // 打印收到的数据到服务端终端（方便观察 HTTP 请求报文）
+            fwrite(buf, 1, r, stdout);   // 直接写入标准输出，比 printf 更安全
+            fflush(stdout);              // 立刻刷新，保证实时显示
+                        
+            write(fd,buf,r);
+        }else if(r==0){
+            //客户端关闭连接
+            printf("client fd=%d disconnected\n",fd);
+            epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
+            close(fd);
+            break;
+        }else{
+            if(errno==EAGAIN||errno==EWOULDBLOCK){
+                //数据读完了，正常退出
+                break;
+            }
+                        
+            // 只有遇到 EAGAIN 之外的错误（如 ECONNRESET），才真正关闭连接
+            fprintf(stderr, "read fd=%d error: %s\n", fd, strerror(errno));
+            epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
+            close(fd);
+            break;
+            }
+    }
+}
 
 int main(){
     int listen_fd=socket(AF_INET,SOCK_STREAM,0);
@@ -69,73 +136,14 @@ int main(){
             fprintf(stderr,"epoll_wait: %s\n",strerror(errno));
             return 1;
         }
+
         for(int i=0;i<n;i++){
             int fd=events[i].data.fd;
             //来新客人了
             if(fd==listen_fd){
-                while(true){
-                    sockaddr_in cli_addr;
-                    socklen_t cli_len=sizeof(cli_addr);
-                    int conn_fd=accept(listen_fd,(sockaddr*)&cli_addr,&cli_len);
-                    if(conn_fd<0){
-                        if(errno==EAGAIN||errno==EWOULDBLOCK){
-                            //没有新连接了，正常退出
-                            break;
-                        }
-                        if(errno == ECONNABORTED){
-                            continue; // 客户端在连接过程中断开，继续等待下一个连接
-                        }
-                        //其他错误
-                        fprintf(stderr,"accept: %s\n",strerror(errno));
-                        break;
-                    }
-                
-                    printf("client connected: %s:%d fd=%d\n",
-                        inet_ntoa(cli_addr.sin_addr),ntohs(cli_addr.sin_port),conn_fd);
-
-                    //conn_fd设置为非阻塞模式
-                    set_nonblock(conn_fd);  
-
-                    epoll_event cev;
-                    //边缘触发模式
-                    cev.events=EPOLLIN|EPOLLET;
-                    cev.data.fd=conn_fd;
-                    epoll_ctl(epfd,EPOLL_CTL_ADD,conn_fd,&cev);
-                }
+                handle_accept(epfd,listen_fd);
             }else{
-                //某个客人的专线就绪，有数据可读
-                char buf[1024];
-                
-                //使用循环读取，直到读完所有数据
-                //ET模式下，内核只会在“无数据->有数据”时通知一次，但是通知里到了多少字节不知道，所以需要换为循环
-                //一直读到EAGIAN为止，防止残余数据不再触发通知，最后永远留在内核缓冲区里
-                while(true){
-                    ssize_t r=read(fd,buf,sizeof(buf)); 
-                    if(r>0){
-                        // 打印收到的数据到服务端终端（方便观察 HTTP 请求报文）
-                        fwrite(buf, 1, r, stdout);   // 直接写入标准输出，比 printf 更安全
-                        fflush(stdout);              // 立刻刷新，保证实时显示
-                        
-                        write(fd,buf,r);
-                    }else if(r==0){
-                        //客户端关闭连接
-                        printf("client fd=%d disconnected\n",fd);
-                        epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
-                        close(fd);
-                        break;
-                    }else{
-                        if(errno==EAGAIN||errno==EWOULDBLOCK){
-                            //数据读完了，正常退出
-                            break;
-                        }
-                        
-                        // 只有遇到 EAGAIN 之外的错误（如 ECONNRESET），才真正关闭连接
-                        fprintf(stderr, "read fd=%d error: %s\n", fd, strerror(errno));
-                        epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
-                        close(fd);
-                        break;
-                    }
-                }
+                handle_read(epfd,fd);
             }
         }
     }
