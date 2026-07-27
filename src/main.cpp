@@ -7,12 +7,29 @@
 #include<unistd.h>
 #include<arpa/inet.h>
 #include<fcntl.h>
-constexpr int MAX_EVENTS=64;
+#include<unordered_map>
 
+#include"connection.h"
+constexpr int MAX_EVENTS=64;
+std::unordered_map<int, Conn> conns;
 //fd转换为非阻塞模式
 void set_nonblock(int fd){
     int flags=fcntl(fd,F_GETFL,0);
     fcntl(fd,F_SETFL,flags|O_NONBLOCK);
+}
+
+void parse(Conn&conn){
+    printf("fd=%d rbuf(%zu bytes):",conn.fd,conn.rbuf.size());
+    for(char c:conn.rbuf){
+        if(c=='\r'){
+            printf("\\r");
+        }else if(c=='\n'){
+            printf("\\n\n");
+        }else{
+            putchar(c); 
+        }
+    }
+    printf("\n---\n");
 }
 
 void handle_accept(int epfd,int listen_fd){
@@ -31,26 +48,33 @@ void handle_accept(int epfd,int listen_fd){
             //其他错误
             fprintf(stderr,"accept: %s\n",strerror(errno));
             break;
-            }
+        }
                 
-            printf("client connected: %s:%d fd=%d\n",
-            inet_ntoa(cli_addr.sin_addr),ntohs(cli_addr.sin_port),conn_fd);
+        printf("client connected: %s:%d fd=%d\n",
+        inet_ntoa(cli_addr.sin_addr),ntohs(cli_addr.sin_port),conn_fd);
 
-            //conn_fd设置为非阻塞模式
-            set_nonblock(conn_fd);  
+        //conn_fd设置为非阻塞模式
+        set_nonblock(conn_fd);  
 
-            epoll_event cev;
-            //边缘触发模式
-            cev.events=EPOLLIN|EPOLLET;
-            cev.data.fd=conn_fd;
-            epoll_ctl(epfd,EPOLL_CTL_ADD,conn_fd,&cev);
+        conns[conn_fd].fd = conn_fd;
+
+        epoll_event cev;
+        //边缘触发模式
+        cev.events=EPOLLIN|EPOLLET;
+        cev.data.fd=conn_fd;
+        epoll_ctl(epfd,EPOLL_CTL_ADD,conn_fd,&cev);
     }
 }
 
 void handle_read(int epfd,int fd){
+    auto it =conns.find(fd);
+    if(it==conns.end()){
+        return ;
+    }
+    Conn& conn=it->second;  
     //某个客人的专线就绪，有数据可读
     char buf[1024];
-                
+    bool has_read=false; // 标记是否读到了数据，用于决定是否调用 parse
     //使用循环读取，直到读完所有数据
     //ET模式下，内核只会在“无数据->有数据”时通知一次，但是通知里到了多少字节不知道，所以需要换为循环
     //一直读到EAGIAN为止，防止残余数据不再触发通知，最后永远留在内核缓冲区里
@@ -61,13 +85,19 @@ void handle_read(int epfd,int fd){
             fwrite(buf, 1, r, stdout);   // 直接写入标准输出，比 printf 更安全
             fflush(stdout);              // 立刻刷新，保证实时显示
                         
-            write(fd,buf,r);
+            conn.rbuf.append(buf, r); // 将读取到的数据追加到连接的读缓冲区
+            has_read=true;
         }else if(r==0){
+            if(has_read) {
+                parse(conn);
+            }
+            
             //客户端关闭连接
             printf("client fd=%d disconnected\n",fd);
             epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
             close(fd);
-            break;
+            conns.erase(fd);
+            return;
         }else{
             if(errno==EAGAIN||errno==EWOULDBLOCK){
                 //数据读完了，正常退出
@@ -78,8 +108,12 @@ void handle_read(int epfd,int fd){
             fprintf(stderr, "read fd=%d error: %s\n", fd, strerror(errno));
             epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
             close(fd);
-            break;
-            }
+            conns.erase(fd);
+            return;
+        }
+    }
+    if(has_read) {
+        parse(conn); // 只有在读取到数据时才调用 parse
     }
 }
 

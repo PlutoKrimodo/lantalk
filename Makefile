@@ -1,7 +1,7 @@
-CXX	:= g++
-CXXFLAGS := -std=c++14 -Wall -Wextra -g
-TARGET	:= lantalk
-SRCS	:= $(wildcard src/*.cpp)
+CXX      := g++
+CXXFLAGS := -std=c++14 -Wall -Wextra -g -Iinclude
+TARGET   := lantalk
+SRCS     := $(wildcard src/*.cpp)
 
 $(TARGET): $(SRCS)
 	$(CXX) $(CXXFLAGS) -o $@ $^
