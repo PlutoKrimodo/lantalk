@@ -17,9 +17,16 @@ void set_nonblock(int fd){
     int flags=fcntl(fd,F_GETFL,0);
     fcntl(fd,F_SETFL,flags|O_NONBLOCK);
 }
+//辅助清理函数
+void close_connection(int epfd, int fd) {
+    epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
+    close(fd);
+    conns.erase(fd);  // 从全局 map 移除
+}
 
-void parse(Conn&conn){
+void parse(Conn&conn, int epfd){
     printf("fd=%d rbuf(%zu bytes):",conn.fd,conn.rbuf.size());
+
     for(char c:conn.rbuf){
         if(c=='\r'){
             printf("\\r");
@@ -30,6 +37,44 @@ void parse(Conn&conn){
         }
     }
     printf("\n---\n");
+
+    if(conn.state==ParseState::REQUEST_LINE){
+        size_t pos=conn.rbuf.find("\r\n");
+        if(pos==std::string::npos){
+            return; //请求行不完整，继续等待下次read
+        }
+        std::string line=conn.rbuf.substr(0,pos);
+        conn.rbuf.erase(0,pos+2); //删除请求行和\r\n
+
+        std::string method, path, version;
+        size_t p1=line.find(' ');
+        if(p1==std::string::npos){
+            close_connection(epfd, conn.fd); // 错误的请求行，关闭连接
+            return;
+        }
+        size_t p2=line.find(' ',p1+1);
+        if(p2==std::string::npos){
+            close_connection(epfd, conn.fd);
+            return; 
+        }
+        method=line.substr(0,p1);
+        path=line.substr(p1+1,p2-p1-1);
+        version=line.substr(p2+1);
+
+        printf("method=%s path=%s version=%s\n",method.c_str(),path.c_str(),version.c_str());
+        if(method!="GET"&&method !="POST"){
+            const char * resp501=
+            "HTTP/1.1 501 Not Implemented\r\n"
+            "Content-Length: 0\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+            write(conn.fd,resp501,strlen(resp501));
+            close_connection(epfd,conn.fd);
+            return;
+        }
+
+        conn.state=ParseState::HEADERS;
+    }
 }
 
 void handle_accept(int epfd,int listen_fd){
@@ -89,14 +134,15 @@ void handle_read(int epfd,int fd){
             has_read=true;
         }else if(r==0){
             if(has_read) {
-                parse(conn);
+                parse(conn,epfd);
+                if(conns.find(fd)==conns.end()){
+                    return;
+                }
             }
             
             //客户端关闭连接
             printf("client fd=%d disconnected\n",fd);
-            epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
-            close(fd);
-            conns.erase(fd);
+            close_connection(epfd, fd);
             return;
         }else{
             if(errno==EAGAIN||errno==EWOULDBLOCK){
@@ -106,14 +152,16 @@ void handle_read(int epfd,int fd){
                         
             // 只有遇到 EAGAIN 之外的错误（如 ECONNRESET），才真正关闭连接
             fprintf(stderr, "read fd=%d error: %s\n", fd, strerror(errno));
-            epoll_ctl(epfd,EPOLL_CTL_DEL,fd,nullptr);
-            close(fd);
-            conns.erase(fd);
+            close_connection(epfd, fd);
             return;
         }
     }
     if(has_read) {
-        parse(conn); // 只有在读取到数据时才调用 parse
+        parse(conn,epfd); // 只有在读取到数据时才调用 parse
+        //检查parse里是否触发了501或者格式错误（已经删除conn），触发了则直接返回
+        if(conns.find(fd)==conns.end()){
+            return;
+        }
     }
 }
 
