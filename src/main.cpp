@@ -8,6 +8,8 @@
 #include<arpa/inet.h>
 #include<fcntl.h>
 #include<unordered_map>
+#include <algorithm>
+#include <cctype>
 
 #include"connection.h"
 constexpr int MAX_EVENTS=64;
@@ -72,8 +74,86 @@ void parse(Conn&conn, int epfd){
             close_connection(epfd,conn.fd);
             return;
         }
-
         conn.state=ParseState::HEADERS;
+    }
+
+    if(conn.state==ParseState::HEADERS){
+        while(true){
+            size_t pos=conn.rbuf.find("\r\n");
+            if(pos==std::string::npos) return;
+            if(pos==0){
+                conn.rbuf.erase(0,2);
+                if(conn.method=="GET"){
+                    conn.state=ParseState::DONE;
+                }else if(conn.method=="POST"){
+                    auto it =conn.headers.find("content-length");
+                    if(it!=conn.headers.end()){
+                        //非法，返回400
+                        char * end;
+                        long len=strtol(it->second.c_str(),&end,10);
+                        if(*end!='\0'||len<0){
+                            const char * resp400=
+                            "HTTP/1.1 400 Bad Request\r\n"
+                            "Content-Length: 0\r\n"
+                            "Connection: close\r\n"
+                            "\r\n";
+
+                            write(conn.fd,resp400,strlen(resp400));
+                            close_connection(epfd,conn.fd);
+                            return;
+                        }
+                        conn.content_length=len;
+                        if(len>0){
+                            conn.state=ParseState::BODY;
+                        }else{
+                            conn.state=ParseState::DONE;
+                        }
+                    }else{
+                        //没有content-length，视为0
+                        conn.state=ParseState::DONE;
+                    }
+                }
+                //验证，打印所有头
+                printf("=== Headers ===\n");
+                for (const auto& [k, v] : conn.headers) {
+                    printf("%s: %s\n", k.c_str(), v.c_str());
+                }
+                printf("===============\n");
+                break;
+            }
+
+            std::string line=conn.rbuf.substr(0,pos);
+            conn.rbuf.erase(0,pos+2);
+            std::string key,value;
+            size_t p=line.find(':');
+            if(p==std::string::npos){
+                // 畸形行：返回 400 并关闭
+                const char* resp400 = 
+                    "HTTP/1.1 400 Bad Request\r\n"
+                    "Content-Length: 0\r\n"
+                    "Connection: close\r\n"
+                    "\r\n";
+                write(conn.fd, resp400, strlen(resp400));
+                close_connection(epfd, conn.fd); // 错误的请求头，关闭连接
+                return;
+            }
+
+            key=line.substr(0,p);
+            //转小写
+            std::transform(key.begin(),key.end(),key.begin(),
+            [](unsigned char c){return std::tolower(c);});
+
+            value=line.substr(p+1);
+            //去掉value前后的空格
+            size_t start=value.find_first_not_of(" \t");
+            size_t end=value.find_last_not_of(" \t");
+            if(start==std::string::npos||end==std::string::npos){
+                value="";
+            }else{
+                value=value.substr(start,end-start+1);
+            }
+            conn.headers[key]=value;
+        }
     }
 }
 

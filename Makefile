@@ -1,5 +1,5 @@
 CXX      := g++
-CXXFLAGS := -std=c++14 -Wall -Wextra -g -Iinclude
+CXXFLAGS := -std=c++23 -Wall -Wextra -g -Iinclude
 TARGET   := lantalk
 SRCS     := $(wildcard src/*.cpp)
 

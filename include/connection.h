@@ -15,5 +15,6 @@ struct Conn{
     std::string method, path, version;
     std::map<std::string ,std::string > headers;
     std::string body;
+    int content_length=0;
     Conn():fd(-1),state(ParseState::REQUEST_LINE){}
 };
