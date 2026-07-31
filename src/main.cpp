@@ -1,15 +1,16 @@
-#include<sys/socket.h>
-#include<sys/epoll.h>
-#include<netinet/in.h>
-#include<cstring>
-#include<cstdio>
-#include<cerrno>
-#include<unistd.h>
-#include<arpa/inet.h>
-#include<fcntl.h>
-#include<unordered_map>
+#include <sys/socket.h>
+#include <sys/epoll.h>
+#include <netinet/in.h>
+#include <cstring>
+#include <cstdio>
+#include <cerrno>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <unordered_map>
 #include <algorithm>
 #include <cctype>
+#include <fstream>
 
 #include"connection.h"
 constexpr int MAX_EVENTS=64;
@@ -64,6 +65,11 @@ void parse(Conn&conn, int epfd){
         version=line.substr(p2+1);
 
         printf("method=%s path=%s version=%s\n",method.c_str(),path.c_str(),version.c_str());
+
+        conn.method = method;
+        conn.path = path;
+        conn.version = version;
+
         if(method!="GET"&&method !="POST"){
             const char * resp501=
             "HTTP/1.1 501 Not Implemented\r\n"
@@ -157,6 +163,73 @@ void parse(Conn&conn, int epfd){
     }
 }
 
+std::string get_content_type(const std::string& path){
+    if(path.size()>=5&&path.substr(path.size()-5)==".html"){
+        return "text/html";
+    }
+    if(path.size()>=4&&path.substr(path.size()-4)==".css"){
+        return "text/css";
+    }
+    if(path.size()>=3&&path.substr(path.size()-3)==".js"){
+        return "application/javascript";
+    }
+    if(path.size()>=4&&path.substr(path.size()-4)==".ico"){
+        return "image/x-icon";
+    }
+    return "text/plain";
+}
+
+std::string make_response(int code, const std::string& reason,const std::string & ctype
+,const std::string & body){
+    std::string resp="HTTP/1.1 "+std::to_string(code)+" "+reason+"\r\n";
+    resp+="Content-Type: " + ctype+"\r\n";
+    resp+="Content-Length: "+std::to_string(body.size())+"\r\n";
+    resp+="Connection: close\r\n";
+    resp+="\r\n";
+    resp+=body;
+    return resp;
+}
+
+void handle_get(Conn& conn, int epfd) {
+    if(conn.state!=ParseState::DONE||conn.method!="GET")return;
+
+    std::string path=conn.path;
+    //默认首页
+    if(path=="/"){
+        path="/index.html";
+    }
+
+    //路径中不得包含".."
+    if(path.find("..")!=std::string::npos){
+        std::string resp=make_response(404,"Not Found",
+        "text/plain","");
+        write(conn.fd,resp.c_str(),resp.size());
+        close_connection(epfd,conn.fd);
+        return;
+    }
+
+    //构造实际文件路径
+    std::string filepath="web"+path;
+
+    //尝试以二进制模式打开文件
+    std::ifstream file(filepath, std::ios::binary);
+    if(!file.is_open()){
+        std::string resp=make_response(404,"Not Found",
+        "text/plain","");
+        write(conn.fd,resp.c_str(),resp.size());
+        close_connection(epfd,conn.fd);
+        return;
+    }
+
+    //读取文件
+    std::string body((std::istreambuf_iterator<char>(file)),
+                      std::istreambuf_iterator<char>());
+    std::string ctype=get_content_type(path);
+    std::string resp=make_response(200,"OK",ctype,body);
+    write(conn.fd,resp.c_str(),resp.size());
+    close_connection(epfd,conn.fd);
+}
+
 void handle_accept(int epfd,int listen_fd){
     while(true){
         sockaddr_in cli_addr;
@@ -241,6 +314,14 @@ void handle_read(int epfd,int fd){
         //检查parse里是否触发了501或者格式错误（已经删除conn），触发了则直接返回
         if(conns.find(fd)==conns.end()){
             return;
+        }
+
+        if(conn.state==ParseState::DONE){
+            handle_get(conn,epfd);
+            //如果handle_get里触发了404或者其他错误（已经删除conn），触发了则直接返回
+            if(conns.find(fd)==conns.end()){
+                return;
+            }
         }
     }
 }
