@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <iostream>
 
 #include"connection.h"
 constexpr int MAX_EVENTS=64;
@@ -20,11 +21,39 @@ void set_nonblock(int fd){
     int flags=fcntl(fd,F_GETFL,0);
     fcntl(fd,F_SETFL,flags|O_NONBLOCK);
 }
+
 //辅助清理函数
 void close_connection(int epfd, int fd) {
     epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
     close(fd);
     conns.erase(fd);  // 从全局 map 移除
+}
+
+std::string get_content_type(const std::string& path){
+    if(path.size()>=5&&path.substr(path.size()-5)==".html"){
+        return "text/html; charset=utf-8";
+    }
+    if(path.size()>=4&&path.substr(path.size()-4)==".css"){
+        return "text/css; charset=utf-8";
+    }
+    if(path.size()>=3&&path.substr(path.size()-3)==".js"){
+        return "application/javascript; charset=utf-8";
+    }
+    if(path.size()>=4&&path.substr(path.size()-4)==".ico"){
+        return "image/x-icon";
+    }
+    return "text/plain";
+}
+
+std::string make_response(int code, const std::string& reason,const std::string & ctype
+,const std::string & body){
+    std::string resp="HTTP/1.1 "+std::to_string(code)+" "+reason+"\r\n";
+    resp+="Content-Type: " + ctype+"\r\n";
+    resp+="Content-Length: "+std::to_string(body.size())+"\r\n";
+    resp+="Connection: close\r\n";
+    resp+="\r\n";
+    resp+=body;
+    return resp;
 }
 
 void parse(Conn&conn, int epfd){
@@ -40,7 +69,9 @@ void parse(Conn&conn, int epfd){
         }
     }
     printf("\n---\n");
+    //HTTP 四状态
 
+    //REQUEST_LINE
     if(conn.state==ParseState::REQUEST_LINE){
         size_t pos=conn.rbuf.find("\r\n");
         if(pos==std::string::npos){
@@ -83,6 +114,7 @@ void parse(Conn&conn, int epfd){
         conn.state=ParseState::HEADERS;
     }
 
+    //HEADERS
     if(conn.state==ParseState::HEADERS){
         while(true){
             size_t pos=conn.rbuf.find("\r\n");
@@ -161,34 +193,30 @@ void parse(Conn&conn, int epfd){
             conn.headers[key]=value;
         }
     }
+
+    //BODY
+    if(conn.state==ParseState::BODY){
+        size_t need=conn.content_length;
+        // 超过 1MB 直接断开
+        if (need > 1024 * 1024) {
+            const char* resp400 = 
+                "HTTP/1.1 400 Bad Request\r\n"
+                "Content-Length: 0\r\n"
+                "Connection: close\r\n"
+                "\r\n";
+            write(conn.fd, resp400, strlen(resp400));
+            close_connection(epfd, conn.fd);
+            return;
+        }
+
+        //没攒够，等下次read
+        if(conn.rbuf.size()<need)return;
+        conn.body=conn.rbuf.substr(0,need);
+        conn.rbuf.erase(0,need);
+        conn.state=ParseState::DONE;
+    }
 }
 
-std::string get_content_type(const std::string& path){
-    if(path.size()>=5&&path.substr(path.size()-5)==".html"){
-        return "text/html";
-    }
-    if(path.size()>=4&&path.substr(path.size()-4)==".css"){
-        return "text/css";
-    }
-    if(path.size()>=3&&path.substr(path.size()-3)==".js"){
-        return "application/javascript";
-    }
-    if(path.size()>=4&&path.substr(path.size()-4)==".ico"){
-        return "image/x-icon";
-    }
-    return "text/plain";
-}
-
-std::string make_response(int code, const std::string& reason,const std::string & ctype
-,const std::string & body){
-    std::string resp="HTTP/1.1 "+std::to_string(code)+" "+reason+"\r\n";
-    resp+="Content-Type: " + ctype+"\r\n";
-    resp+="Content-Length: "+std::to_string(body.size())+"\r\n";
-    resp+="Connection: close\r\n";
-    resp+="\r\n";
-    resp+=body;
-    return resp;
-}
 
 void handle_get(Conn& conn, int epfd) {
     if(conn.state!=ParseState::DONE||conn.method!="GET")return;
@@ -228,6 +256,23 @@ void handle_get(Conn& conn, int epfd) {
     std::string resp=make_response(200,"OK",ctype,body);
     write(conn.fd,resp.c_str(),resp.size());
     close_connection(epfd,conn.fd);
+}
+
+void handle_post(Conn& conn, int epfd) {
+    if(conn.state!=ParseState::DONE||conn.method!="POST")return;
+
+    if(conn.path=="/register"){
+        std::cout<<"=== POST /register ===\n";
+        std::cout<<"body: "<<conn.body<<"\n";
+
+        std::string resp=make_response(200,"OK","text/plain","registered (fake)");
+        write(conn.fd,resp.c_str(),resp.size());
+        close_connection(epfd,conn.fd);
+    }else{
+        std::string resp = make_response(404, "Not Found", "text/plain", "");
+        write(conn.fd, resp.c_str(), resp.size());
+        close_connection(epfd, conn.fd);
+    }
 }
 
 void handle_accept(int epfd,int listen_fd){
@@ -317,7 +362,12 @@ void handle_read(int epfd,int fd){
         }
 
         if(conn.state==ParseState::DONE){
-            handle_get(conn,epfd);
+            if(conn.method=="GET"){
+                handle_get(conn,epfd);
+            }else if(conn.method=="POST"){
+                handle_post(conn,epfd);
+            }
+
             //如果handle_get里触发了404或者其他错误（已经删除conn），触发了则直接返回
             if(conns.find(fd)==conns.end()){
                 return;
