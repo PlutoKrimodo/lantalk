@@ -12,8 +12,13 @@
 #include <cctype>
 #include <fstream>
 #include <iostream>
+#include <cassert>
 
-#include"connection.h"
+#include "connection.h"
+#include "ws.h"
+
+
+
 constexpr int MAX_EVENTS=64;
 std::unordered_map<int, Conn> conns;
 //fd转换为非阻塞模式
@@ -69,8 +74,7 @@ void parse(Conn&conn, int epfd){
         }
     }
     printf("\n---\n");
-    //HTTP 四状态
-
+    
     //REQUEST_LINE
     if(conn.state==ParseState::REQUEST_LINE){
         size_t pos=conn.rbuf.find("\r\n");
@@ -377,6 +381,10 @@ void handle_read(int epfd,int fd){
 }
 
 int main(){
+    //测试代码
+    assert(compute_accept("dGhlIHNhbXBsZSBub25jZQ==")=="s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    printf("compute_accept test passed\n");
+
     int listen_fd=socket(AF_INET,SOCK_STREAM,0);
     if(listen_fd<0){
         fprintf(stderr,"socket() failed: %s\n",strerror(errno));
