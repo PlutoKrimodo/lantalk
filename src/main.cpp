@@ -366,6 +366,32 @@ void handle_read(int epfd,int fd){
         }
 
         if(conn.state==ParseState::DONE){
+            auto it =conn.headers.find("upgrade");
+            if(it!=conn.headers.end()&&it->second=="websocket"){
+                auto key_it = conn.headers.find("sec-websocket-key");
+                if(key_it!=conn.headers.end()){
+                    std::string accept = compute_accept(conn.headers["sec-websocket-key"]);
+                    std::string resp=
+                        "HTTP/1.1 101 Switching Protocols\r\n"
+                        "Upgrade: websocket\r\n"
+                        "Connection: Upgrade\r\n"
+                        "Sec-WebSocket-Accept: "+accept+"\r\n"
+                        "\r\n";
+                    write(conn.fd,resp.data(),resp.size());
+                    //转换为WebSocket
+                    conn.proto=Proto::WS;
+                    conn.rbuf.clear();
+                    //不断开，保持连接
+                    return;
+                }else{
+                    // 缺少 key，返回 400
+                    const char* resp400 = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    write(conn.fd, resp400, strlen(resp400));
+                    close_connection(epfd, conn.fd);
+                    return;
+                }
+            }
+
             if(conn.method=="GET"){
                 handle_get(conn,epfd);
             }else if(conn.method=="POST"){
@@ -381,10 +407,6 @@ void handle_read(int epfd,int fd){
 }
 
 int main(){
-    //测试代码
-    assert(compute_accept("dGhlIHNhbXBsZSBub25jZQ==")=="s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
-    printf("compute_accept test passed\n");
-
     int listen_fd=socket(AF_INET,SOCK_STREAM,0);
     if(listen_fd<0){
         fprintf(stderr,"socket() failed: %s\n",strerror(errno));

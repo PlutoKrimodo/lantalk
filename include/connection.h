@@ -8,10 +8,16 @@ enum class ParseState{
     DONE
 };
 
+enum class Proto{
+    HTTP,
+    WS
+};
+
 struct Conn{
     int fd=-1;
     std::string rbuf; // 读缓冲区
     ParseState state=ParseState::REQUEST_LINE;
+    Proto proto=Proto::HTTP;
     std::string method, path, version;
     std::map<std::string ,std::string > headers;
     std::string body;
