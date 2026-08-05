@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iostream>
 #include <cassert>
+#include <cstdint>
 
 #include "connection.h"
 #include "ws.h"
@@ -221,6 +222,78 @@ void parse(Conn&conn, int epfd){
     }
 }
 
+void parse_ws_frame(Conn&conn, int epfd){
+    while(true){
+        if(conn.rbuf.size()<2) return;
+
+        uint8_t b0 = static_cast<uint8_t> (conn.rbuf[0]);
+        uint8_t b1 = static_cast<uint8_t> (conn.rbuf[1]);
+
+        bool fin = b0& 0x80;
+        (void) fin; // 目前不处理分片帧，暂时忽略 fin 标志
+        uint8_t opcode = b0& 0x0F;
+        bool masked = b1 & 0x80;
+        uint8_t len = b1 & 0x7F;
+
+        if(!masked){
+            fprintf(stderr,"Client frame must be masked\n");
+            close_connection(epfd,conn.fd);
+            return;
+        }
+
+        if (opcode == 0x9 || opcode == 0xA) {
+            // 忽略 Ping/Pong，但需要消费帧
+            size_t header_len = 2 + 4;
+            size_t total_len = header_len + len;
+            if (conn.rbuf.size() < total_len) return;
+            conn.rbuf.erase(0, total_len);
+            printf("Ignored ping/pong frame\n");
+            continue;
+        }
+
+        if(opcode!=0x1){
+            fprintf(stderr,"Unsupported opcode: %d (only 0x1 text supported)\n",
+            opcode);
+            close_connection(epfd,conn.fd);
+            return;
+        }
+        if(len>125){
+            fprintf(stderr,"Payload length %u >125 not supported yet\n",
+            len);
+            close_connection(epfd,conn.fd);
+            return;
+        }
+
+        //计算帧总长度
+        size_t header_len = 2+4;
+        size_t total_len =header_len+len;
+
+        if(conn.rbuf.size()<total_len){
+            //半包，退回等待后续数据
+            return;
+        }
+
+        //提取掩码key
+        uint8_t mask_key[4];
+        for(int i=0;i<4;++i){
+            mask_key[i]=static_cast<uint8_t>(conn.rbuf[2+i]);
+        }
+
+        //提取payload
+        size_t payload_start = 2+4;
+        std::string payload = conn.rbuf.substr(payload_start,len);
+
+        //解码
+        for(size_t i=0;i<len;++i){
+            payload[i] ^= mask_key[i%4];
+        }
+
+        conn.rbuf.erase(0,total_len);
+
+
+        printf("Received text (len=%u): %.*s\n", len, (int)len, payload.data());
+    }
+}
 
 void handle_get(Conn& conn, int epfd) {
     if(conn.state!=ParseState::DONE||conn.method!="GET")return;
@@ -329,9 +402,10 @@ void handle_read(int epfd,int fd){
         ssize_t r=read(fd,buf,sizeof(buf)); 
         if(r>0){
             // 打印收到的数据到服务端终端（方便观察 HTTP 请求报文）
-            fwrite(buf, 1, r, stdout);   // 直接写入标准输出，比 printf 更安全
-            fflush(stdout);              // 立刻刷新，保证实时显示
-                        
+            if(conn.proto==Proto::HTTP){
+                fwrite(buf, 1, r, stdout);   // 直接写入标准输出，比 printf 更安全
+                fflush(stdout);              // 立刻刷新，保证实时显示
+            }    
             conn.rbuf.append(buf, r); // 将读取到的数据追加到连接的读缓冲区
             has_read=true;
         }else if(r==0){
@@ -359,48 +433,52 @@ void handle_read(int epfd,int fd){
         }
     }
     if(has_read) {
-        parse(conn,epfd); // 只有在读取到数据时才调用 parse
-        //检查parse里是否触发了501或者格式错误（已经删除conn），触发了则直接返回
-        if(conns.find(fd)==conns.end()){
-            return;
-        }
+        if(conn.proto==Proto::WS){
+            parse_ws_frame(conn,epfd);
+            if(conns.find(fd)==conns.end()) return;
 
-        if(conn.state==ParseState::DONE){
-            auto it =conn.headers.find("upgrade");
-            if(it!=conn.headers.end()&&it->second=="websocket"){
-                auto key_it = conn.headers.find("sec-websocket-key");
-                if(key_it!=conn.headers.end()){
-                    std::string accept = compute_accept(conn.headers["sec-websocket-key"]);
-                    std::string resp=
-                        "HTTP/1.1 101 Switching Protocols\r\n"
-                        "Upgrade: websocket\r\n"
-                        "Connection: Upgrade\r\n"
-                        "Sec-WebSocket-Accept: "+accept+"\r\n"
-                        "\r\n";
-                    write(conn.fd,resp.data(),resp.size());
-                    //转换为WebSocket
-                    conn.proto=Proto::WS;
-                    conn.rbuf.clear();
-                    //不断开，保持连接
-                    return;
-                }else{
-                    // 缺少 key，返回 400
-                    const char* resp400 = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                    write(conn.fd, resp400, strlen(resp400));
-                    close_connection(epfd, conn.fd);
+        }else{
+            parse(conn,epfd); // 只有在读取到数据时才调用 parse
+            //检查parse里是否触发了501或者格式错误（已经删除conn），触发了则直接返回
+            if(conns.find(fd)==conns.end())return;
+                
+            if(conn.state==ParseState::DONE){
+                auto it =conn.headers.find("upgrade");
+                if(it!=conn.headers.end()&&it->second=="websocket"){
+                    auto key_it = conn.headers.find("sec-websocket-key");
+                    if(key_it!=conn.headers.end()){
+                        std::string accept = compute_accept(conn.headers["sec-websocket-key"]);
+                        std::string resp=
+                            "HTTP/1.1 101 Switching Protocols\r\n"
+                            "Upgrade: websocket\r\n"
+                            "Connection: Upgrade\r\n"
+                            "Sec-WebSocket-Accept: "+accept+"\r\n"
+                            "\r\n";
+                        write(conn.fd,resp.data(),resp.size());
+                        //转换为WebSocket
+                        conn.proto=Proto::WS;
+                        conn.rbuf.clear();
+                        //不断开，保持连接
+                        return;
+                    }else{
+                        // 缺少 key，返回 400
+                        const char* resp400 = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        write(conn.fd, resp400, strlen(resp400));
+                        close_connection(epfd, conn.fd);
+                        return;
+                    }
+                }
+
+                if(conn.method=="GET"){
+                    handle_get(conn,epfd);
+                }else if(conn.method=="POST"){
+                    handle_post(conn,epfd);
+                }
+
+                //如果handle_get里触发了404或者其他错误（已经删除conn），触发了则直接返回
+                if(conns.find(fd)==conns.end()){
                     return;
                 }
-            }
-
-            if(conn.method=="GET"){
-                handle_get(conn,epfd);
-            }else if(conn.method=="POST"){
-                handle_post(conn,epfd);
-            }
-
-            //如果handle_get里触发了404或者其他错误（已经删除conn），触发了则直接返回
-            if(conns.find(fd)==conns.end()){
-                return;
             }
         }
     }
