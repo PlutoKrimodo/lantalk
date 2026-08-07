@@ -222,6 +222,39 @@ void parse(Conn&conn, int epfd){
     }
 }
 
+//服务端发送WebSocket文本帧
+void send_ws_text(int fd, const std::string&msg){
+    std::string frame;
+    frame.push_back(static_cast<char>(0x81));
+    size_t n= msg.size();
+    if(n<=125){
+        frame.push_back(static_cast<char>(n));
+    }else if(n<=65535){
+        frame.push_back(static_cast<char>(126));
+        uint16_t nl=htons(static_cast<uint16_t>(n));
+        frame.append(reinterpret_cast<const char*>(&nl),2);
+    }else{
+        //大于65535，无法处理
+        return;
+    }
+    frame+=msg;
+
+    const char*data=frame.data();
+    size_t remaining =frame.size();
+    while(remaining>0){
+        ssize_t w=write(fd,data,remaining);
+        if(w<=0){
+            if(errno==EAGAIN||errno==EWOULDBLOCK){
+                return;
+            }
+            //出错
+            return;
+        }
+        data += w;
+        remaining -= w;
+    }
+}
+
 void parse_ws_frame(Conn&conn, int epfd){
     while(true){
         if(conn.rbuf.size()<2) return;
@@ -241,57 +274,75 @@ void parse_ws_frame(Conn&conn, int epfd){
             return;
         }
 
-        if (opcode == 0x9 || opcode == 0xA) {
-            // 忽略 Ping/Pong，但需要消费帧
-            size_t header_len = 2 + 4;
-            size_t total_len = header_len + len;
-            if (conn.rbuf.size() < total_len) return;
-            conn.rbuf.erase(0, total_len);
-            printf("Ignored ping/pong frame\n");
-            continue;
-        }
-
-        if(opcode!=0x1){
-            fprintf(stderr,"Unsupported opcode: %d (only 0x1 text supported)\n",
-            opcode);
+        //处理扩展长度
+        uint64_t payload_len=len;
+        size_t header_len =2;   //基本头
+        if(len==126){
+            if(conn.rbuf.size()<4)return;
+            uint16_t ext_len;
+            memcpy(&ext_len,conn.rbuf.data()+2,2);
+            payload_len=ntohs(ext_len);
+            header_len+=2;
+        }else if(len==127){
+            //不支持64位长度
+            std::string close_frame;
+            close_frame.push_back(static_cast<char>(0x88));
+            close_frame.push_back(static_cast<char>(0x00));
+            write(conn.fd,close_frame.data(),close_frame.size());
             close_connection(epfd,conn.fd);
             return;
         }
-        if(len>125){
-            fprintf(stderr,"Payload length %u >125 not supported yet\n",
-            len);
+        //拒绝过大帧
+        if(payload_len>1024*1024){
             close_connection(epfd,conn.fd);
             return;
         }
-
-        //计算帧总长度
-        size_t header_len = 2+4;
-        size_t total_len =header_len+len;
+        
+        size_t key_start=2+(len==126?2:0);  //注意，没有处理127
+        size_t total_header=key_start+4;
+        size_t total_len = total_header+payload_len;
 
         if(conn.rbuf.size()<total_len){
-            //半包，退回等待后续数据
             return;
         }
 
         //提取掩码key
         uint8_t mask_key[4];
         for(int i=0;i<4;++i){
-            mask_key[i]=static_cast<uint8_t>(conn.rbuf[2+i]);
+            mask_key[i]=static_cast<uint8_t>(conn.rbuf[key_start+i]);
         }
 
         //提取payload
-        size_t payload_start = 2+4;
-        std::string payload = conn.rbuf.substr(payload_start,len);
+        size_t payload_start = key_start+4;
+        std::string payload = conn.rbuf.substr(payload_start,payload_len);
 
         //解码
-        for(size_t i=0;i<len;++i){
+        for(size_t i=0;i<payload_len;++i){
             payload[i] ^= mask_key[i%4];
         }
 
         conn.rbuf.erase(0,total_len);
 
-
-        printf("Received text (len=%u): %.*s\n", len, (int)len, payload.data());
+        if(opcode==0x9||opcode==0xA){
+            printf("Ignored ping/pong frame\n");
+            continue;
+        }else if(opcode==0x8){
+            std::string close_frame;
+            close_frame.push_back(static_cast<char>(0x88));
+            close_frame.push_back(static_cast<char>(0x00));
+            write(conn.fd,close_frame.data(),close_frame.size());
+            close_connection(epfd,conn.fd);
+            return;
+        }else if(opcode==0x1){
+            printf("Received text (payload_len=%zu): %.*s\n"
+                , payload_len, (int)payload_len, payload.data());
+            //原样发回
+            send_ws_text(conn.fd,payload);
+        }else{
+            fprintf(stderr,"Unsupported opcode: %d\n",opcode);
+            close_connection(epfd,conn.fd);
+            return;
+        }
     }
 }
 
