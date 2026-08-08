@@ -276,13 +276,11 @@ void parse_ws_frame(Conn&conn, int epfd){
 
         //处理扩展长度
         uint64_t payload_len=len;
-        size_t header_len =2;   //基本头
         if(len==126){
             if(conn.rbuf.size()<4)return;
             uint16_t ext_len;
             memcpy(&ext_len,conn.rbuf.data()+2,2);
             payload_len=ntohs(ext_len);
-            header_len+=2;
         }else if(len==127){
             //不支持64位长度
             std::string close_frame;
@@ -323,25 +321,53 @@ void parse_ws_frame(Conn&conn, int epfd){
 
         conn.rbuf.erase(0,total_len);
 
-        if(opcode==0x9||opcode==0xA){
-            printf("Ignored ping/pong frame\n");
-            continue;
-        }else if(opcode==0x8){
-            std::string close_frame;
-            close_frame.push_back(static_cast<char>(0x88));
-            close_frame.push_back(static_cast<char>(0x00));
-            write(conn.fd,close_frame.data(),close_frame.size());
-            close_connection(epfd,conn.fd);
-            return;
-        }else if(opcode==0x1){
-            printf("Received text (payload_len=%zu): %.*s\n"
+        switch(opcode){
+            case 0x1:{
+                printf("Received text (payload_len=%zu): %.*s\n"
                 , payload_len, (int)payload_len, payload.data());
-            //原样发回
-            send_ws_text(conn.fd,payload);
-        }else{
-            fprintf(stderr,"Unsupported opcode: %d\n",opcode);
-            close_connection(epfd,conn.fd);
-            return;
+                //原样发回
+                send_ws_text(conn.fd,payload);
+                break;
+            }
+            case 0x8:{
+                printf("Received Close frame\n");
+                std::string close_frame;
+                close_frame.push_back(static_cast<char>(0x88));
+                close_frame.push_back(static_cast<char>(0x00));
+                write(conn.fd,close_frame.data(),close_frame.size());
+                close_connection(epfd,conn.fd);
+                return;
+            }
+            case 0x9:{
+                printf("Received ping (payload_len=%zu)\n",payload_len);
+                //回复pong
+                std::string pong_frame;
+                pong_frame.push_back(static_cast<char>(0x8A));
+
+                if(payload_len<=125){
+                    pong_frame.push_back(static_cast<char>(payload_len));
+                }else{
+                    pong_frame.push_back(static_cast<char>(126));
+                    uint16_t nlen=htons(static_cast<uint16_t>(payload_len));
+                    pong_frame.append(reinterpret_cast<const char*>(&nlen),2);
+                }
+                pong_frame+=payload;
+                write(conn.fd,pong_frame.data(),pong_frame.size());
+                break;
+            }
+            case 0xA:{
+                printf("Received pong (payload_len=%zu)\n",payload_len);
+                break;
+            }
+            default:{
+                fprintf(stderr,"Unsupported opcode: %d\n",opcode);
+                std::string close_frame;
+                close_frame.push_back(static_cast<char>(0x88));
+                close_frame.push_back(static_cast<char>(0x00));
+                write(conn.fd,close_frame.data(),close_frame.size());
+                close_connection(epfd,conn.fd);
+                return;
+            }
         }
     }
 }
