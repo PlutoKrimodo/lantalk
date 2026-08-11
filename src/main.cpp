@@ -17,7 +17,7 @@
 
 #include "connection.h"
 #include "ws.h"
-
+#include "db.h"
 
 
 constexpr int MAX_EVENTS=64;
@@ -562,6 +562,36 @@ void handle_read(int epfd,int fd){
 }
 
 int main(){
+    Db db;
+    const char* db_user = std::getenv("DB_USER");
+    const char* db_pass = std::getenv("DB_PASS");
+    if(!db_user || !db_pass){
+        fprintf(stderr, "Please set DB_USER and DB_PASS environment variables\n");
+        return 1;
+    }
+    if(!db.connect(db_user, db_pass, "lantalk")){
+        return 1;
+    }
+
+    //验证查询
+    if(mysql_query(db.raw(),"SELECT COUNT(*) FROM users")==0){
+        MYSQL_RES* res = mysql_store_result(db.raw());
+        if(res){
+            MYSQL_ROW row = mysql_fetch_row(res);
+            if(row&&row[0]){
+                printf("db connected, users=%s\n",row[0]);
+            }else{
+                printf("db connected, but no row returned\n");
+            }
+            mysql_free_result(res);
+        }else{
+            fprintf(stderr, "mysql_store_result failed: %s\n", mysql_error(db.raw()));
+        }
+    }else{
+        fprintf(stderr, "SELECT COUNT(*) failed: %s\n", mysql_error(db.raw()));
+        return 1;
+    }
+
     int listen_fd=socket(AF_INET,SOCK_STREAM,0);
     if(listen_fd<0){
         fprintf(stderr,"socket() failed: %s\n",strerror(errno));

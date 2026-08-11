@@ -1,6 +1,6 @@
 CXX      := g++
 CXXFLAGS := -std=c++23 -Wall -Wextra -g -Iinclude
-LDFLAGS  := -lcrypto
+LDFLAGS  := -lcrypto -lmysqlclient
 TARGET   := lantalk
 SRCS     := $(wildcard src/*.cpp)
 
