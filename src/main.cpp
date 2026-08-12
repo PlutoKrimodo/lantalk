@@ -18,6 +18,8 @@
 #include "connection.h"
 #include "ws.h"
 #include "db.h"
+#include "utils.h"
+Db g_db;    //全局数据库对象，便于在各个函数中使用
 
 
 constexpr int MAX_EVENTS=64;
@@ -416,17 +418,83 @@ void handle_post(Conn& conn, int epfd) {
     if(conn.state!=ParseState::DONE||conn.method!="POST")return;
 
     if(conn.path=="/register"){
-        std::cout<<"=== POST /register ===\n";
-        std::cout<<"body: "<<conn.body<<"\n";
+        std::unordered_map<std::string,std::string>params;
+        size_t start=0;
+        while(start<conn.body.size()){
+            size_t end = conn.body.find('&',start);
+            std::string pair = conn.body.substr(start,end-start);
+            size_t eq= pair.find('=');
+            if(eq!=std::string::npos){
+                std::string key = pair.substr(0,eq);
+                std::string value = pair.substr(eq+1);
+                params[key] = value;
+            }
+            if(end==std::string::npos) break;
+            start = end+1;
+        }
 
-        std::string resp=make_response(200,"OK","text/plain","registered (fake)");
-        write(conn.fd,resp.c_str(),resp.size());
+        std::string username = params["username"];
+        std::string password = params["password"];
+
+        //白名单校验，只允许字母数字，且为非空
+        auto valid = [](const std::string& s){
+            if(s.empty()) return false;
+            for(char c:s){
+                if(!std::isalnum(static_cast<unsigned char>(c))) return false;
+            }
+            return true;
+        };
+
+        if(!valid(username)||!valid(password)){
+            std::string resp = make_response(400, "Bad Request", "text/plain",
+                "Username and password must be alphanumeric and non-empty");
+            write(conn.fd, resp.c_str(), resp.size());
+            close_connection(epfd, conn.fd);
+            return;
+        }
+
+        //生成盐
+        std::string salt = random_hex(16);
+        std::string pwd_hash=sha256_hex(salt+password);
+
+        //SQL转义
+        char esc_user[65];
+        mysql_real_escape_string(g_db.raw(),esc_user,username.c_str(),
+        username.size());
+        char esc_hash[129];
+        mysql_real_escape_string(g_db.raw(), esc_hash, 
+        pwd_hash.c_str(), pwd_hash.size());
+        char esc_salt[65];
+        mysql_real_escape_string(g_db.raw(), esc_salt, 
+        salt.c_str(), salt.size());
+
+        std::string sql="INSERT INTO users(username, pwd_hash, salt) VALUES('"+ std::string(esc_user)+"','"+ std::string(esc_hash)+"','"+ std::string(esc_salt)+"')";
+
+        //执行INSERT
+        if(mysql_query(g_db.raw(),sql.c_str())==0){
+            std::string resp = make_response(200,"OK","text/plain",
+            "Registration successful");
+            write(conn.fd,resp.c_str(),resp.size());
+        }else{
+            int err = mysql_errno(g_db.raw());
+            if(err==1062){
+                std::string resp = make_response(409, "Conflict", "text/plain", 
+                    "Username already exists");
+                write(conn.fd, resp.c_str(), resp.size());
+            }else{
+                fprintf(stderr, "INSERT failed: %s\n", mysql_error(g_db.raw()));
+                std::string resp = make_response(500, "Internal Server Error", "text/plain", "Database error");
+                write(conn.fd, resp.c_str(), resp.size());
+            }
+        }
         close_connection(epfd,conn.fd);
-    }else{
-        std::string resp = make_response(404, "Not Found", "text/plain", "");
-        write(conn.fd, resp.c_str(), resp.size());
-        close_connection(epfd, conn.fd);
+        return;
     }
+
+    //其他POST路径
+    std::string resp = make_response(404, "Not Found", "text/plain", "");
+    write(conn.fd, resp.c_str(), resp.size());
+    close_connection(epfd, conn.fd);
 }
 
 void handle_accept(int epfd,int listen_fd){
@@ -562,20 +630,19 @@ void handle_read(int epfd,int fd){
 }
 
 int main(){
-    Db db;
     const char* db_user = std::getenv("DB_USER");
     const char* db_pass = std::getenv("DB_PASS");
     if(!db_user || !db_pass){
         fprintf(stderr, "Please set DB_USER and DB_PASS environment variables\n");
         return 1;
     }
-    if(!db.connect(db_user, db_pass, "lantalk")){
+    if(!g_db.connect(db_user, db_pass, "lantalk")){
         return 1;
     }
 
     //验证查询
-    if(mysql_query(db.raw(),"SELECT COUNT(*) FROM users")==0){
-        MYSQL_RES* res = mysql_store_result(db.raw());
+    if(mysql_query(g_db.raw(),"SELECT COUNT(*) FROM users")==0){
+        MYSQL_RES* res = mysql_store_result(g_db.raw());
         if(res){
             MYSQL_ROW row = mysql_fetch_row(res);
             if(row&&row[0]){
@@ -585,10 +652,10 @@ int main(){
             }
             mysql_free_result(res);
         }else{
-            fprintf(stderr, "mysql_store_result failed: %s\n", mysql_error(db.raw()));
+            fprintf(stderr, "mysql_store_result failed: %s\n", mysql_error(g_db.raw()));
         }
     }else{
-        fprintf(stderr, "SELECT COUNT(*) failed: %s\n", mysql_error(db.raw()));
+        fprintf(stderr, "SELECT COUNT(*) failed: %s\n", mysql_error(g_db.raw()));
         return 1;
     }
 
