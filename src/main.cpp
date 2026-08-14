@@ -19,8 +19,11 @@
 #include "ws.h"
 #include "db.h"
 #include "utils.h"
+#include "json.hpp"
 Db g_db;    //全局数据库对象，便于在各个函数中使用
-
+std::unordered_map<std::string, int> token2uid;
+std::unordered_map<int, int>online;
+using json = nlohmann::json;
 
 constexpr int MAX_EVENTS=64;
 std::unordered_map<int, Conn> conns;
@@ -32,9 +35,34 @@ void set_nonblock(int fd){
 
 //辅助清理函数
 void close_connection(int epfd, int fd) {
+    auto it = conns.find(fd);
+    if(it!=conns.end()){
+        Conn& conn = it->second;
+        if(conn.uid != 0){
+            auto online_it = online.find(conn.uid);
+            if(online_it != online.end() && online_it->second == fd){
+                online.erase(online_it);
+                printf("online erased for uid=%d\n",conn.uid);
+            }
+        }
+    }
+
     epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
     close(fd);
     conns.erase(fd);  // 从全局 map 移除
+}
+
+//密码校验函数
+bool is_password_valid(const std::string&pwd){
+    if(pwd.size()<8||pwd.size()>20) return false;
+    bool has_letter=false, has_digit=false;
+    for(char c:pwd){
+        unsigned char uc=static_cast<unsigned char>(c);
+        if(std::isalpha(uc)) has_letter=true;
+        else if(std::isdigit(uc)) has_digit=true;
+        else return false; // 非字母数字即为非法
+    }
+    return has_letter&&has_digit;
 }
 
 std::string get_content_type(const std::string& path){
@@ -257,6 +285,60 @@ void send_ws_text(int fd, const std::string&msg){
     }
 }
 
+//处理WS文本信息
+void handle_ws_text(Conn&conn, const std::string& payload, int epfd){
+    json j= json::parse(payload, nullptr, false);
+    if(j.is_discarded()){
+        fprintf(stderr,"Invalid JSON form fd=%d\n",conn.fd);
+        close_connection(epfd,conn.fd);
+        return;
+    }
+
+    std::string type = j.value("type","");
+
+    if(conn.uid == 0){
+        if(type != "auth"){
+            fprintf(stderr,"Unauthenticated message type '%s' from fd=%d, closing\n",
+            type.c_str(),conn.fd);
+            close_connection(epfd,conn.fd);
+            return;
+        }
+
+        std::string token = j.value("token","");
+        if(token.empty()){
+            json reply = {{"type","auth"},{"ok",false},{"error","missing token"}};
+            send_ws_text(conn.fd,reply.dump());
+            close_connection(epfd,conn.fd);
+            return;
+        }
+        auto it = token2uid.find(token);
+        if(it == token2uid.end()){
+            //无效token
+            json reply = {{"type", "auth"}, {"ok", false}, {"error", "invalid token"}};
+            send_ws_text(conn.fd,reply.dump());
+            close_connection(epfd,conn.fd);
+            return;
+        }
+
+        int uid = it->second;
+        conn.uid = uid;
+
+        json reply = {{"type", "auth"},{"ok",true}};
+        send_ws_text(conn.fd, reply.dump());
+
+        online[uid] = conn.fd;
+        printf("auth success: uid=%d, fd=%d\n", uid, conn.fd);
+        return;
+    }
+
+    if(type == "auth"){
+        return;
+    }
+
+    //其他业务信息，目前仅回显
+    send_ws_text(conn.fd, payload);
+}
+
 void parse_ws_frame(Conn&conn, int epfd){
     while(true){
         if(conn.rbuf.size()<2) return;
@@ -325,10 +407,9 @@ void parse_ws_frame(Conn&conn, int epfd){
 
         switch(opcode){
             case 0x1:{
-                printf("Received text (payload_len=%zu): %.*s\n"
-                , payload_len, (int)payload_len, payload.data());
-                //原样发回
-                send_ws_text(conn.fd,payload);
+                handle_ws_text(conn, payload, epfd);
+                //如果handle关闭了连接，需要检查conn是不是被删除
+                if(conns.find(conn.fd) == conns.end()) return;
                 break;
             }
             case 0x8:{
@@ -378,6 +459,12 @@ void handle_get(Conn& conn, int epfd) {
     if(conn.state!=ParseState::DONE||conn.method!="GET")return;
 
     std::string path=conn.path;
+
+    size_t q = path.find('?');
+    if (q != std::string::npos) {
+        path = path.substr(0, q);
+    }
+
     //默认首页
     if(path=="/"){
         path="/index.html";
@@ -437,17 +524,25 @@ void handle_post(Conn& conn, int epfd) {
         std::string password = params["password"];
 
         //白名单校验，只允许字母数字，且为非空
-        auto valid = [](const std::string& s){
+        auto valid_username = [](const std::string& s){
             if(s.empty()) return false;
-            for(char c:s){
+            for(char c : s){
                 if(!std::isalnum(static_cast<unsigned char>(c))) return false;
             }
             return true;
         };
 
-        if(!valid(username)||!valid(password)){
+        if (!valid_username(username)) {
             std::string resp = make_response(400, "Bad Request", "text/plain",
-                "Username and password must be alphanumeric and non-empty");
+                "Username must be alphanumeric and non-empty");
+            write(conn.fd, resp.c_str(), resp.size());
+            close_connection(epfd, conn.fd);
+            return;
+        }
+
+        if (!is_password_valid(password)) {
+            std::string resp = make_response(400, "Bad Request", "text/plain",
+                "Password must be 8-20 characters, alphanumeric only, and contain both letters and digits");
             write(conn.fd, resp.c_str(), resp.size());
             close_connection(epfd, conn.fd);
             return;
@@ -487,6 +582,79 @@ void handle_post(Conn& conn, int epfd) {
                 write(conn.fd, resp.c_str(), resp.size());
             }
         }
+        close_connection(epfd,conn.fd);
+        return;
+    } else if (conn.path == "/login"){
+        //解析表单，这点和注册一致
+        std::unordered_map<std::string,std::string>params;
+        size_t start=0;
+        while(start<conn.body.size()){
+            size_t end = conn.body.find('&',start);
+            std::string pair = conn.body.substr(start,end-start);
+            size_t eq= pair.find('=');
+            if(eq!=std::string::npos){
+                std::string key = pair.substr(0,eq);
+                std::string value = pair.substr(eq+1);
+                params[key] = value;
+            }
+            if(end==std::string::npos) break;
+            start = end+1;
+        }
+
+        std::string username = params["username"];
+        std::string password = params["password"];
+
+        //查询
+        char esc_user[65];
+        mysql_real_escape_string(g_db.raw(), esc_user, username.c_str(), username.size());  // 修正拼写：g_db.raw()
+        std::string sql = "SELECT id, salt, pwd_hash FROM users WHERE username = '" + std::string(esc_user) + "'";
+        json resp;
+
+        if(mysql_query(g_db.raw(),sql.c_str())==0){
+            MYSQL_RES * res = mysql_store_result(g_db.raw());
+            if(res){
+                MYSQL_ROW row = mysql_fetch_row(res);
+                if(row){
+                    int uid = atoi(row[0]);
+                    std::string salt = row[1];
+                    std::string stored_hash = row[2];
+                    std::string computed_hash = sha256_hex(salt+password);
+
+                    if(stored_hash == computed_hash){
+                        //登录成功，生成token
+                        std::string token = random_hex(32);
+
+                        token2uid[token] = uid;
+                        resp={
+                            {"ok",true},
+                            {"token",token},
+                            {"uid",uid},
+                            {"name",username}
+                        };
+                    }else{
+                        resp={{"ok",false}};    //密码错误
+                    }
+                }else{
+                    resp={{"ok",false}};    //用户不存在
+                }
+                mysql_free_result(res);
+            }else{
+                resp={{"ok",false}};
+                fprintf(stderr,"mysql_store_result failed: %s\n",mysql_error(g_db.raw()));
+            }
+        } else {
+            resp={{"ok",false}};
+            fprintf(stderr,"SELECT failed: %s\n",mysql_error(g_db.raw()));
+        }
+
+        //返回JSON
+        std::string body = resp.dump();
+        std::string http_resp = "HTTP/1.1 200 OK\r\n"
+                                "Content-Type: application/json\r\n"
+                                "Content-Length: "+ std::to_string(body.size())+"\r\n"
+                                "Connection: close\r\n"
+                                "\r\n" + body;
+        write(conn.fd,http_resp.c_str(),http_resp.size());
         close_connection(epfd,conn.fd);
         return;
     }

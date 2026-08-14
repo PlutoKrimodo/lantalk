@@ -1,1 +1,117 @@
-body {background-color: #f0f0f0; font-family: Arial, sans-serif; text-align: center; margin-top: 50px;}
+/* 全局重置 */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: Arial, sans-serif;
+    background: #f0f2f5;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+}
+
+.container {
+    width: 100%;
+    max-width: 400px;
+    padding: 20px;
+}
+
+.card {
+    background: #fff;
+    border-radius: 10px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    padding: 30px 35px 40px;
+    text-align: center;
+}
+
+.card h1 {
+    font-size: 28px;
+    color: #1a73e8;
+    margin-bottom: 5px;
+}
+
+.card h2 {
+    font-size: 18px;
+    color: #555;
+    margin-bottom: 20px;
+    font-weight: normal;
+}
+
+.field {
+    margin-bottom: 18px;
+    text-align: left;
+}
+
+.field label {
+    display: block;
+    font-size: 14px;
+    color: #333;
+    margin-bottom: 4px;
+}
+
+.field input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-size: 16px;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+.field input:focus {
+    border-color: #1a73e8;
+    box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.2);
+}
+
+button {
+    width: 100%;
+    padding: 12px;
+    background: #1a73e8;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.hint {
+    font-size: 12px;
+    color: #888;
+    margin-top: 4px;
+    text-align: left;
+}
+
+button:hover {
+    background: #1557b0;
+}
+
+.msg {
+    margin-top: 12px;
+    font-size: 14px;
+    min-height: 20px;
+}
+
+.msg.error {
+    color: #d32f2f;
+}
+
+.switch {
+    margin-top: 16px;
+    font-size: 14px;
+}
+
+.switch a {
+    color: #1a73e8;
+    text-decoration: none;
+}
+
+.switch a:hover {
+    text-decoration: underline;
+}

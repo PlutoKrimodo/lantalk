@@ -3,17 +3,45 @@
 <head>
     <meta charset="UTF-8">
     <title>LanTalk</title>
+    <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-    <h1>LanTalk Coming Soon</h1>
-    <form method="POST" action="/register">
-        <p>
-            <label>用户名：<input name="username" placeholder="用户名"></label>
-        </p>
-        <p>
-            <label>密码：<input name="password" type="password" placeholder="密码"></label>
-        </p>
-        <button type="submit">注册</button>
-    </form>
+    <div class="container">
+        <!-- 登录卡片 -->
+        <div id="login-card" class="card">
+            <h1>LanTalk</h1>
+            <h2>登录</h2>
+            <div class="field">
+                <label>用户名</label>
+                <input id="username" type="text" placeholder="请输入用户名">
+            </div>
+            <div class="field">
+                <label>密码</label>
+                <input id="password" type="password" placeholder="请输入密码">
+            </div>
+            <button id="loginBtn">登录</button>
+            <p id="err" class="msg error"></p>
+            <p class="switch"><a href="#" id="showRegister">还没有账号？注册</a></p>
+        </div>
+
+        <!-- 注册卡片（初始隐藏） -->
+        <div id="register-card" class="card" style="display: none;">
+            <h1>LanTalk</h1>
+            <h2>注册</h2>
+            <div class="field">
+                <label>新用户名</label>
+                <input id="regUsername" type="text" placeholder="请设置用户名">
+            </div>
+            <div class="field">
+                <label>新密码</label>
+                <input id="regPassword" type="password" placeholder="请设置密码">
+                <div id="pwdHint" class="hint">密码需8-20位，同时包含字母和数字</div>
+            </div>
+            <button id="regBtn">注册</button>
+            <p id="regErr" class="msg error"></p>
+            <p class="switch"><a href="#" id="showLogin">已有账号？去登录</a></p>
+        </div>
+    </div>
+    <script src="/script.js"></script>
 </body>
 </html>

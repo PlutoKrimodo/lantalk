@@ -22,5 +22,9 @@ struct Conn{
     std::map<std::string ,std::string > headers;
     std::string body;
     int content_length=0;
+
+    //身份字段
+    int uid=0;
+    std::string username;
     Conn():fd(-1),state(ParseState::REQUEST_LINE){}
 };

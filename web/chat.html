@@ -1,7 +1,25 @@
 <!DOCTYPE html>
 <meta charset="utf-8">
 <script>
+    const token = new URLSearchParams(location.search).get("token");
+    if (!token) {
+        document.body.innerHTML = '缺少 token，请先登录';
+        throw new Error('no token');
+    }
     const ws = new WebSocket("ws://" + location.host + "/chat");
-    ws.onopen  = () => console.log("open");
-    ws.onclose = () => console.log("close");
+    ws.onopen = () => {
+        console.log("WS open, sending auth");
+        ws.send(JSON.stringify({ type: "auth", token }));
+    };
+    ws.onmessage = (e) => {
+        const data = JSON.parse(e.data);
+        console.log("Received:", data);
+        if (data.type === "auth" && data.ok === true) {
+            console.log("Authentication successful");
+        } else if (data.type === "auth" && data.ok === false) {
+            alert("认证失败: " + (data.error || ""));
+            ws.close();
+        }
+    };
+    ws.onclose = () => console.log("WS closed");
 </script>
