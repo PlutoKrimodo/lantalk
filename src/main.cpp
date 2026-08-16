@@ -21,8 +21,9 @@
 #include "utils.h"
 #include "json.hpp"
 Db g_db;    //全局数据库对象，便于在各个函数中使用
-std::unordered_map<std::string, int> token2uid;
+std::unordered_map<std::string, int> token_to_uid;
 std::unordered_map<int, int>online;
+std::unordered_map<int,std::string>uid_to_username;
 using json = nlohmann::json;
 
 constexpr int MAX_EVENTS=64;
@@ -285,45 +286,60 @@ void send_ws_text(int fd, const std::string&msg){
     }
 }
 
-//处理WS文本信息
-void handle_ws_text(Conn&conn, const std::string& payload, int epfd){
-    json j= json::parse(payload, nullptr, false);
-    if(j.is_discarded()){
-        fprintf(stderr,"Invalid JSON form fd=%d\n",conn.fd);
-        close_connection(epfd,conn.fd);
+//处理ws文本消息
+void handle_ws_text(Conn& conn, const std::string& payload, int epfd) {
+    //测试
+    printf("handle_ws_text: payload = %s\n", payload.c_str());
+
+    json j = json::parse(payload, nullptr, false);
+    if (j.is_discarded()) {
+        fprintf(stderr, "Invalid JSON from fd=%d\n", conn.fd);
+        close_connection(epfd, conn.fd);
         return;
     }
 
-    std::string type = j.value("type","");
+    std::string type = j.value("type", "");
 
-    if(conn.uid == 0){
-        if(type != "auth"){
-            fprintf(stderr,"Unauthenticated message type '%s' from fd=%d, closing\n",
-            type.c_str(),conn.fd);
-            close_connection(epfd,conn.fd);
+    if (conn.uid == 0) {
+        if (type != "auth") {
+            fprintf(stderr, "Unauthenticated message type '%s' from fd=%d, closing\n",
+                    type.c_str(), conn.fd);
+            close_connection(epfd, conn.fd);
             return;
         }
 
-        std::string token = j.value("token","");
-        if(token.empty()){
-            json reply = {{"type","auth"},{"ok",false},{"error","missing token"}};
-            send_ws_text(conn.fd,reply.dump());
-            close_connection(epfd,conn.fd);
+        std::string token = j.value("token", "");
+        if (token.empty()) {
+            json reply = {{"type", "auth"}, {"ok", false}, {"error", "missing token"}};
+            send_ws_text(conn.fd, reply.dump());
+            close_connection(epfd, conn.fd);
             return;
         }
-        auto it = token2uid.find(token);
-        if(it == token2uid.end()){
-            //无效token
+
+        auto it = token_to_uid.find(token);
+        if (it == token_to_uid.end()) {
             json reply = {{"type", "auth"}, {"ok", false}, {"error", "invalid token"}};
-            send_ws_text(conn.fd,reply.dump());
-            close_connection(epfd,conn.fd);
+            send_ws_text(conn.fd, reply.dump());
+            close_connection(epfd, conn.fd);
             return;
         }
 
         int uid = it->second;
         conn.uid = uid;
 
-        json reply = {{"type", "auth"},{"ok",true}};
+        // 获取用户名并缓存到 conn
+        auto uname_it = uid_to_username.find(uid);
+        if (uname_it != uid_to_username.end()) {
+            conn.username = uname_it->second;
+        } else {
+            json reply = {{"type", "auth"}, {"ok", false}, {"error", "username not found"}};
+            send_ws_text(conn.fd, reply.dump());
+            close_connection(epfd, conn.fd);
+            return;
+        }
+
+        // 认证成功回复
+        json reply = {{"type", "auth"}, {"ok", true}};
         send_ws_text(conn.fd, reply.dump());
 
         online[uid] = conn.fd;
@@ -331,17 +347,65 @@ void handle_ws_text(Conn&conn, const std::string& payload, int epfd){
         return;
     }
 
-    if(type == "auth"){
+    if (type == "msg") {
+        if (conn.uid == 0) {  // 安全冗余
+            close_connection(epfd, conn.fd);
+            return;
+        }
+
+        std::string content = j.value("content", "");
+        int to = j.value("to", 0);   // 接收者，广播时扩展
+
+        if (content.empty()) {
+            json reply = {{"type", "msg"}, {"error", "empty content"}};
+            send_ws_text(conn.fd, reply.dump());
+            return;
+        }
+
+        // SQL 转义
+        char esc_content[content.size() * 2 + 1];
+        mysql_real_escape_string(g_db.raw(), esc_content, content.c_str(), content.size());
+
+        char sql[1024];
+        snprintf(sql, sizeof(sql),
+                 "INSERT INTO messages (from_id, to_id, content) VALUES (%d, %d, '%s')",
+                 conn.uid, to, esc_content);
+
+        if (mysql_query(g_db.raw(), sql) != 0) {
+            fprintf(stderr, "INSERT failed: %s\n", mysql_error(g_db.raw()));
+            json reply = {{"type", "msg"}, {"error", "database error"}};
+            send_ws_text(conn.fd, reply.dump());
+            return;
+        }
+
+        json out = {
+            {"type", "msg"},
+            {"from", conn.username},
+            {"to", to},
+            {"content", content},
+            {"ts", now_hhmm()}        // 服务端时间
+        };
+        send_ws_text(conn.fd, out.dump());
         return;
     }
 
-    //其他业务信息，目前仅回显
+    // 已认证用户发送的其他类型（如 ping/pong）可在这里处理，或直接忽略
+    // 目前忽略，仅打印日志
+    printf("Unhandled message type '%s' from authenticated fd=%d\n", type.c_str(), conn.fd);
+    // 其他未知类型：原样回显（仅用于调试）
     send_ws_text(conn.fd, payload);
 }
 
+
 void parse_ws_frame(Conn&conn, int epfd){
+    //测试
+    printf("parse_ws_frame: rbuf size = %zu\n", conn.rbuf.size());
     while(true){
-        if(conn.rbuf.size()<2) return;
+        if(conn.rbuf.size()<2){
+            //测试 打印
+            printf("parse_ws_frame: waiting for more data\n");
+            return;
+        }
 
         uint8_t b0 = static_cast<uint8_t> (conn.rbuf[0]);
         uint8_t b1 = static_cast<uint8_t> (conn.rbuf[1]);
@@ -607,7 +671,7 @@ void handle_post(Conn& conn, int epfd) {
         //查询
         char esc_user[65];
         mysql_real_escape_string(g_db.raw(), esc_user, username.c_str(), username.size());  // 修正拼写：g_db.raw()
-        std::string sql = "SELECT id, salt, pwd_hash FROM users WHERE username = '" + std::string(esc_user) + "'";
+        std::string sql = "SELECT id, username, salt, pwd_hash FROM users WHERE username = '" + std::string(esc_user) + "'";
         json resp;
 
         if(mysql_query(g_db.raw(),sql.c_str())==0){
@@ -616,15 +680,17 @@ void handle_post(Conn& conn, int epfd) {
                 MYSQL_ROW row = mysql_fetch_row(res);
                 if(row){
                     int uid = atoi(row[0]);
-                    std::string salt = row[1];
-                    std::string stored_hash = row[2];
+                    std::string username = row[1];
+                    std::string salt = row[2];
+                    std::string stored_hash = row[3];
                     std::string computed_hash = sha256_hex(salt+password);
 
                     if(stored_hash == computed_hash){
                         //登录成功，生成token
                         std::string token = random_hex(32);
 
-                        token2uid[token] = uid;
+                        token_to_uid[token] = uid;
+                        uid_to_username[uid] = username;
                         resp={
                             {"ok",true},
                             {"token",token},

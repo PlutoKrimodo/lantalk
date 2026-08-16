@@ -4,6 +4,8 @@
 #include <sstream>
 #include <iomanip>
 #include <cstdio>
+#include <ctime>
+#include <chrono>
 
 std::string random_hex(int nbytes){
     std::ifstream urandom("/dev/urandom",std::ios::binary);
@@ -32,5 +34,16 @@ std::string sha256_hex(const std::string& s){
         sprintf(buf+2*i,"%02x",hash[i]);
     }
     return std::string(buf,64);
+}
+
+//时间格式化
+std::string now_hhmm(){
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    struct tm tm_buf;
+    localtime_r(&t, &tm_buf);
+    char buf[6];
+    strftime(buf, sizeof(buf), "%H:%M", &tm_buf);
+    return std::string(buf);
 }
     
