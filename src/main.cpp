@@ -630,22 +630,25 @@ void handle_post(Conn& conn, int epfd) {
         std::string sql="INSERT INTO users(username, pwd_hash, salt) VALUES('"+ std::string(esc_user)+"','"+ std::string(esc_hash)+"','"+ std::string(esc_salt)+"')";
 
         //执行INSERT
+        json resp;
         if(mysql_query(g_db.raw(),sql.c_str())==0){
-            std::string resp = make_response(200,"OK","text/plain",
-            "Registration successful");
-            write(conn.fd,resp.c_str(),resp.size());
+            resp = {{"ok", true}};
         }else{
             int err = mysql_errno(g_db.raw());
             if(err==1062){
-                std::string resp = make_response(409, "Conflict", "text/plain", 
-                    "Username already exists");
-                write(conn.fd, resp.c_str(), resp.size());
+                resp = {{"ok", false}, {"err", "用户名已存在"}};
             }else{
-                fprintf(stderr, "INSERT failed: %s\n", mysql_error(g_db.raw()));
-                std::string resp = make_response(500, "Internal Server Error", "text/plain", "Database error");
-                write(conn.fd, resp.c_str(), resp.size());
+                resp = {{"ok", false}, {"err", "数据库错误"}};
             }
         }
+        std::string body = resp.dump();
+        std::string http_resp = "HTTP/1.1 200 OK\r\n"
+                                "Content-Type: application/json\r\n"
+                                "Content-Length: "+ std::to_string(body.size())+"\r\n"
+                                "Connection: close\r\n"
+                                "\r\n" + body;
+        write(conn.fd, http_resp.c_str(), http_resp.size());
+        
         close_connection(epfd,conn.fd);
         return;
     } else if (conn.path == "/login"){
