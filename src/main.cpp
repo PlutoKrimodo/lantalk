@@ -2,6 +2,7 @@
 #include <sys/epoll.h>
 #include <netinet/in.h>
 #include <cstring>
+#include <vector>
 #include <cstdio>
 #include <cerrno>
 #include <unistd.h>
@@ -28,6 +29,34 @@ using json = nlohmann::json;
 
 constexpr int MAX_EVENTS=64;
 std::unordered_map<int, Conn> conns;
+//此为函数声明
+void send_ws_text(int fd, const std::string& msg, int epfd);
+//广播文本消息
+void broadcast_text(const std::string& msg, int epfd){
+    std::vector<int> fds;
+    fds.reserve(online.size());
+    for (auto& [uid, fd]: online){
+        fds.push_back(fd);
+    }
+
+    for(int fd: fds){
+        send_ws_text(fd, msg, epfd);
+    }
+}
+
+//广播在线列表
+void broadcast_userlist(int epfd){
+    json arr = json::array();
+    for(auto&[uid, fd]:online){
+        auto it = uid_to_username.find(uid);
+        if(it != uid_to_username.end()){
+            arr.push_back({{"id",uid},{"name", it->second}});
+        }
+    }
+    json msg = {{"type","userlist"}, {"users",arr}};
+    broadcast_text(msg.dump(), epfd);
+}
+
 //fd转换为非阻塞模式
 void set_nonblock(int fd){
     int flags=fcntl(fd,F_GETFL,0);
@@ -44,6 +73,8 @@ void close_connection(int epfd, int fd) {
             if(online_it != online.end() && online_it->second == fd){
                 online.erase(online_it);
                 printf("online erased for uid=%d\n",conn.uid);
+                //更新后的用户列表
+                broadcast_userlist(epfd);
             }
         }
     }
@@ -254,7 +285,7 @@ void parse(Conn&conn, int epfd){
 }
 
 //服务端发送WebSocket文本帧
-void send_ws_text(int fd, const std::string&msg){
+void send_ws_text(int fd, const std::string&msg, int epfd){
     std::string frame;
     frame.push_back(static_cast<char>(0x81));
     size_t n= msg.size();
@@ -273,12 +304,15 @@ void send_ws_text(int fd, const std::string&msg){
     const char*data=frame.data();
     size_t remaining =frame.size();
     while(remaining>0){
-        ssize_t w=write(fd,data,remaining);
+        //MSG_NOSIGNAL
+        //防止因广播中的某个fd死去，send触发SIGPIPE，导致进程终止，服务器崩溃
+        ssize_t w=send(fd,data,remaining, MSG_NOSIGNAL);
         if(w<=0){
             if(errno==EAGAIN||errno==EWOULDBLOCK){
                 return;
             }
             //出错
+            close_connection(epfd, fd);
             return;
         }
         data += w;
@@ -311,7 +345,7 @@ void handle_ws_text(Conn& conn, const std::string& payload, int epfd) {
         std::string token = j.value("token", "");
         if (token.empty()) {
             json reply = {{"type", "auth"}, {"ok", false}, {"error", "missing token"}};
-            send_ws_text(conn.fd, reply.dump());
+            send_ws_text(conn.fd, reply.dump(), epfd);
             close_connection(epfd, conn.fd);
             return;
         }
@@ -319,7 +353,7 @@ void handle_ws_text(Conn& conn, const std::string& payload, int epfd) {
         auto it = token_to_uid.find(token);
         if (it == token_to_uid.end()) {
             json reply = {{"type", "auth"}, {"ok", false}, {"error", "invalid token"}};
-            send_ws_text(conn.fd, reply.dump());
+            send_ws_text(conn.fd, reply.dump(), epfd);
             close_connection(epfd, conn.fd);
             return;
         }
@@ -333,17 +367,19 @@ void handle_ws_text(Conn& conn, const std::string& payload, int epfd) {
             conn.username = uname_it->second;
         } else {
             json reply = {{"type", "auth"}, {"ok", false}, {"error", "username not found"}};
-            send_ws_text(conn.fd, reply.dump());
+            send_ws_text(conn.fd, reply.dump(), epfd);
             close_connection(epfd, conn.fd);
             return;
         }
 
         // 认证成功回复
         json reply = {{"type", "auth"}, {"ok", true}};
-        send_ws_text(conn.fd, reply.dump());
+        send_ws_text(conn.fd, reply.dump(), epfd);
 
         online[uid] = conn.fd;
         printf("auth success: uid=%d, fd=%d\n", uid, conn.fd);
+        //广播最新在线列表
+        broadcast_userlist(epfd);
         return;
     }
 
@@ -358,7 +394,7 @@ void handle_ws_text(Conn& conn, const std::string& payload, int epfd) {
 
         if (content.empty()) {
             json reply = {{"type", "msg"}, {"error", "empty content"}};
-            send_ws_text(conn.fd, reply.dump());
+            send_ws_text(conn.fd, reply.dump(),epfd);
             return;
         }
 
@@ -374,18 +410,19 @@ void handle_ws_text(Conn& conn, const std::string& payload, int epfd) {
         if (mysql_query(g_db.raw(), sql) != 0) {
             fprintf(stderr, "INSERT failed: %s\n", mysql_error(g_db.raw()));
             json reply = {{"type", "msg"}, {"error", "database error"}};
-            send_ws_text(conn.fd, reply.dump());
+            send_ws_text(conn.fd, reply.dump(), epfd);
             return;
         }
 
         json out = {
             {"type", "msg"},
             {"from", conn.username},
-            {"to", to},
+            {"to", 0},
             {"content", content},
             {"ts", now_hhmm()}        // 服务端时间
         };
-        send_ws_text(conn.fd, out.dump());
+        //广播给所有在线客户端
+        broadcast_text(out.dump(), epfd);
         return;
     }
 
@@ -393,7 +430,7 @@ void handle_ws_text(Conn& conn, const std::string& payload, int epfd) {
     // 目前忽略，仅打印日志
     printf("Unhandled message type '%s' from authenticated fd=%d\n", type.c_str(), conn.fd);
     // 其他未知类型：原样回显（仅用于调试）
-    send_ws_text(conn.fd, payload);
+    send_ws_text(conn.fd, payload, epfd);
 }
 
 

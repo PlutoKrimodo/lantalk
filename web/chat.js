@@ -34,6 +34,22 @@
         msgs.scrollTop = msgs.scrollHeight;
     }
 
+    //用户列表
+    function renderUsers(users) {
+        const ul = document.getElementById('userlist');
+        ul.innerHTML = ''; //清空
+        const groupLi = document.createElement('li');
+        groupLi.className = 'group';
+        groupLi.textContent = '群聊';
+        ul.appendChild(groupLi);
+
+        users.forEach(u =>{
+            const li = document.createElement('li');
+            li.textContent = u.name;
+            ul.appendChild(li);
+        });
+    }
+
     // 发送消息
     function sendMessage() {
         const text = textInput.value.trim();
@@ -77,6 +93,8 @@
                     }
                 } else if (m.type === 'msg') {
                     renderMsg(m);
+                } else if (m.type === 'userlist') {
+                    renderUsers(m.users);
                 } else {
                     console.warn('未知消息类型:', m.type);
                 }
