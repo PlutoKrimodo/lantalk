@@ -14,6 +14,8 @@
     }
 
     let ws = null;
+    let currentTo = 0;      // 当前聊天对象，0 表示群聊
+    let currentTargetName = '群聊'; // 当前聊天对象名称
 
     // 渲染消息
     function renderMsg(m) {
@@ -40,12 +42,31 @@
         ul.innerHTML = ''; //清空
         const groupLi = document.createElement('li');
         groupLi.className = 'group';
-        groupLi.textContent = '群聊';
-        ul.appendChild(groupLi);
 
-        users.forEach(u =>{
+        if (currentTo === 0){
+            groupLi.classList.add('active');
+        }
+
+        groupLi.textContent = '群聊';
+        groupLi.onclick = function() {
+            document.querySelectorAll('#userlist li').forEach(el => el.classList.remove('avtive'));
+            currentTo = 0;
+            currentTargetName = '群聊';
+        };
+        ul.appendChild(groupLi);
+        //在线用户
+        users.forEach(u => {
             const li = document.createElement('li');
             li.textContent = u.name;
+            if (u.id === currentTo){
+                li.classList.add('active');
+            }
+            li.onclick = function(){
+                document.querySelectorAll('#userlist li').forEach(el => el.classList.remove('active'));
+                this.classList.add('active');
+                currentTo = u.id;
+                currentTargetName = u.name;
+            };
             ul.appendChild(li);
         });
     }
@@ -58,7 +79,7 @@
         }
         ws.send(JSON.stringify({
             type: 'msg',
-            to: 0,          // 群聊标识（目前写死）
+            to: currentTo,          // 群聊标识 0或者目标用户id
             content: text
         }));
         textInput.value = '';

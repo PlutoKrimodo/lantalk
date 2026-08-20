@@ -398,7 +398,7 @@ void handle_ws_text(Conn& conn, const std::string& payload, int epfd) {
             return;
         }
 
-        // SQL 转义
+        // SQL 转义  无论是私聊还是群聊的消息都需要入库
         char esc_content[content.size() * 2 + 1];
         mysql_real_escape_string(g_db.raw(), esc_content, content.c_str(), content.size());
 
@@ -417,12 +417,35 @@ void handle_ws_text(Conn& conn, const std::string& payload, int epfd) {
         json out = {
             {"type", "msg"},
             {"from", conn.username},
-            {"to", 0},
+            {"to", to},
             {"content", content},
             {"ts", now_hhmm()}        // 服务端时间
         };
-        //广播给所有在线客户端
-        broadcast_text(out.dump(), epfd);
+        std::string msg = out.dump();
+
+        //私聊路由
+        if(to != 0){
+            auto target_it = online.find(to);
+            if(target_it == online.end()){
+                //此时发送目标不在线
+                json sys = {
+                    {"type", "msg"},
+                    {"from", "系统"},
+                    {"to", conn.uid},
+                    {"content", "对方目前不在线"},
+                    {"ts" , now_hhmm()}
+                };
+                send_ws_text(conn.fd, sys.dump(), epfd);
+            }else{
+                send_ws_text(target_it->second, msg, epfd);
+                if(to != conn.uid){
+                    send_ws_text(conn.fd, msg, epfd);
+                }
+            }
+        }else{
+            //群聊 此时to为0
+            broadcast_text(msg, epfd);
+        }
         return;
     }
 
